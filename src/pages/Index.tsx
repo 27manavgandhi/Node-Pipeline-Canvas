@@ -1,4 +1,3 @@
-
 import React, { useCallback, useState, useMemo } from 'react';
 import {
   ReactFlow,
@@ -38,6 +37,12 @@ const nodeTypes = {
   apiCall: APICallNode,
   filter: FilterNode,
   merge: MergeNode,
+};
+
+// Backend URLs configuration
+const BACKEND_URLS = {
+  production: 'https://node-pipeline-canvas-1.onrender.com',
+  localhost: 'http://localhost:8000'
 };
 
 const initialNodes: Node[] = [
@@ -154,6 +159,58 @@ const Index = () => {
     }
   };
 
+  // Function to try making a request to a specific backend URL
+  const makeBackendRequest = async (baseUrl: string, endpoint: string, options: RequestInit) => {
+    const url = `${baseUrl}${endpoint}`;
+    console.log(`Attempting request to: ${url}`);
+    
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Request failed with status ${response.status}: ${await response.text()}`);
+    }
+    
+    return response;
+  };
+
+  // Function to try multiple backend URLs
+  const tryBackendRequest = async (endpoint: string, options: RequestInit) => {
+    const urls = [BACKEND_URLS.production, BACKEND_URLS.localhost];
+    let lastError = null;
+    
+    for (const baseUrl of urls) {
+      try {
+        console.log(`Trying backend: ${baseUrl}`);
+        const response = await makeBackendRequest(baseUrl, endpoint, options);
+        console.log(`Success with backend: ${baseUrl}`);
+        return { response, usedUrl: baseUrl };
+      } catch (error) {
+        console.log(`Failed with ${baseUrl}:`, error);
+        lastError = error;
+        
+        // If it's a network error, try the next URL
+        if (error instanceof Error && 
+            (error.message.includes('Failed to fetch') || 
+             error.message.includes('NetworkError') ||
+             error.message.includes('fetch'))) {
+          continue;
+        }
+        
+        // If it's a server error (not network), don't try other URLs
+        throw error;
+      }
+    }
+    
+    // If all URLs failed, throw the last error
+    throw lastError || new Error('All backend URLs failed');
+  };
+
   const handleSubmit = async () => {
     setIsSubmitting(true);
     try {
@@ -177,26 +234,16 @@ const Index = () => {
 
       console.log('Cleaned data:', { nodes: cleanedNodes, edges: cleanedEdges });
 
-      // First check if backend is running
+      // First check if any backend is running
       console.log('Checking backend connection...');
-      const healthCheck = await fetch('http://localhost:8000/', {
+      const { response: healthResponse, usedUrl } = await tryBackendRequest('/', {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
       });
 
-      if (!healthCheck.ok) {
-        throw new Error(`Backend health check failed. Status: ${healthCheck.status}`);
-      }
+      console.log(`Backend is running at ${usedUrl}, sending pipeline data...`);
 
-      console.log('Backend is running, sending pipeline data...');
-
-      const response = await fetch('http://localhost:8000/pipelines/parse', {
+      const { response } = await tryBackendRequest('/pipelines/parse', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({ 
           nodes: cleanedNodes, 
           edges: cleanedEdges 
@@ -223,8 +270,9 @@ const Index = () => {
       let errorMessage = 'Unknown error';
       
       if (error instanceof Error) {
-        if (error.message.includes('Failed to fetch')) {
-          errorMessage = 'Cannot connect to backend. Make sure the backend is running on port 8000 with: cd backend && python run.py';
+        if (error.message.includes('Failed to fetch') || 
+            error.message.includes('All backend URLs failed')) {
+          errorMessage = `Cannot connect to backend. Tried both production (${BACKEND_URLS.production}) and localhost (${BACKEND_URLS.localhost}). Make sure at least one backend is running.`;
         } else {
           errorMessage = error.message;
         }
